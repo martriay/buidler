@@ -1,3 +1,4 @@
+import Bugsnag, { Event as BugsnagEvent, OnErrorCallback } from "@bugsnag/js";
 import * as Sentry from "@sentry/node";
 import debug from "debug";
 import os from "os";
@@ -52,6 +53,95 @@ interface ErrorContextData {
 interface ErrorReporterClient {
   sendMessage(message: string, context: any): Promise<void>;
   sendErrorReport(error: Error): Promise<void>;
+}
+
+class BugsnagClient implements ErrorReporterClient {
+  private _log = debug("buidler:core:analytics:bugsnag");
+  private readonly _BUGSNAG_API_KEY = "0d1affee077c44232592a0b985b2dca5";
+  constructor(
+    projectId: string,
+    clientId: string,
+    userType: UserType,
+    userAgent: string,
+    buidlerVersion: string
+  ) {
+    // setup metadata to be included in all reports by default
+    // each entry is displayed as a tab in the Bugsnag dashboard
+    const metadata = {
+      user: {
+        type: userType,
+      },
+      device: {
+        userAgent,
+        os: os.type(),
+        platform: os.platform(),
+        release: os.release(),
+      },
+      project: {
+        id: projectId,
+      },
+    };
+
+    // delegate bugsnag internal logs to "debug" module
+    const customLogger = {
+      debug: this._log.extend("debug"),
+      info: this._log.extend("info"),
+      warn: this._log.extend("warn"),
+      error: this._log.extend("error"),
+    };
+
+    // init bugsnag client
+    Bugsnag.start({
+      apiKey: this._BUGSNAG_API_KEY,
+      appVersion: buidlerVersion,
+      user: {
+        // this property is useful to determine the unique users affected by a particular error
+        id: clientId,
+      },
+      metadata,
+      logger: customLogger,
+    });
+
+    this._log("Bugsnag client init");
+  }
+
+  public async sendErrorReport(error: Error) {
+    this._log("Sending error report...");
+    const contextData = contextualizeError(error);
+
+    try {
+      const event = await this._bugsnagNotifyAsync(
+        error,
+        (_event: BugsnagEvent) => {
+          _event.addMetadata("context", contextData);
+        }
+      );
+      this._log(`Successfully sent report: '${event.errors[0].errorMessage}'`);
+    } catch (error) {
+      this._log(`Failed to report error, reason: ${error.message || error}`);
+    }
+  }
+
+  public async sendMessage() {
+    // no message send in bugsnag. // TODO refactor to breadcrumb send?
+    return;
+  }
+
+  /**
+   * Async version of Bugsnag.notify() method.
+   * Resolves to the Bugsnag.Event object if successful, or an error if failed.
+   *
+   * @param error - the error object to be sent
+   * @param onError - callback used to add or amend data sent to Bugsnag dashboard. Also can cancel the event if this returns false.
+   * @private
+   */
+  private _bugsnagNotifyAsync(error: Error, onError?: OnErrorCallback) {
+    return new Promise<BugsnagEvent>((resolve, reject) =>
+      Bugsnag.notify(error, onError, (reportError, reportEvent: BugsnagEvent) =>
+        reportError ? reject(reportError) : resolve(reportEvent)
+      )
+    );
+  }
 }
 
 class SentryClient implements ErrorReporterClient {
@@ -190,6 +280,14 @@ export class ErrorReporter implements ErrorReporterClient {
   }) {
     this._enabled = enabled && !isLocalDev();
 
+    const bugsnagClient = new BugsnagClient(
+      projectId,
+      clientId,
+      userType,
+      userAgent,
+      buidlerVersion
+    );
+
     const sentryClient = new SentryClient(
       projectId,
       clientId,
@@ -198,7 +296,7 @@ export class ErrorReporter implements ErrorReporterClient {
       buidlerVersion
     );
 
-    this._clients = [sentryClient];
+    this._clients = [sentryClient, bugsnagClient];
   }
 
   public async sendMessage(message: string, context: any) {
