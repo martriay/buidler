@@ -2,6 +2,7 @@ import Bugsnag, { Event as BugsnagEvent, OnErrorCallback } from "@bugsnag/js";
 import * as Sentry from "@sentry/node";
 import debug from "debug";
 import os from "os";
+import Rollbar from "rollbar";
 
 import { BuidlerError, BuidlerPluginError } from "../core/errors";
 import { REVERSE_ERRORS_MAP } from "../core/errors-list";
@@ -53,6 +54,68 @@ interface ErrorContextData {
 interface ErrorReporterClient {
   sendMessage(message: string, context: any): Promise<void>;
   sendErrorReport(error: Error): Promise<void>;
+}
+
+class RollbarClient implements ErrorReporterClient {
+  private readonly _rollbar: Rollbar;
+  private readonly _log = debug("buidler:core:analytics:rollbar");
+
+  private readonly _ROLLBAR_TOKEN: string = "13583a9fea154aac987ae5dc4760693e";
+
+  constructor(
+    projectId: string,
+    clientId: string,
+    userType: UserType,
+    userAgent: string,
+    buidlerVersion: string
+  ) {
+    this._rollbar = new Rollbar({
+      accessToken: this._ROLLBAR_TOKEN,
+      captureUncaught: true,
+      captureUnhandledRejections: true,
+    });
+
+    this._rollbar.configure({
+      payload: {
+        person: {
+          id: clientId,
+          type: userType,
+        },
+        project: {
+          id: projectId,
+        },
+        device: {
+          userAgent,
+          os: os.type(),
+          platform: os.platform(),
+          release: os.release(),
+        },
+        version: buidlerVersion,
+        javascript: {
+          code_version: buidlerVersion,
+          source_map_enabled: true,
+        },
+      },
+    });
+  }
+
+  // public constructor
+  public async sendMessage(message: string, context: any) {
+    this._log("Sending message");
+    this._rollbar.info(message, context);
+    this._log("Message sent");
+  }
+
+  public async sendErrorReport(error: Error) {
+    this._log("Sending error report...");
+    this._rollbar.error(error, contextualizeError(error));
+    await this._waitForSend();
+    this._log("Error report sent succesfully");
+  }
+
+  private async _waitForSend() {
+    return new Promise((r) => this._rollbar.wait(r));
+  }
 }
 
 class BugsnagClient implements ErrorReporterClient {
@@ -288,6 +351,14 @@ export class ErrorReporter implements ErrorReporterClient {
       buidlerVersion
     );
 
+    const rollbarClient = new RollbarClient(
+      projectId,
+      clientId,
+      userType,
+      userAgent,
+      buidlerVersion
+    );
+
     const sentryClient = new SentryClient(
       projectId,
       clientId,
@@ -296,7 +367,7 @@ export class ErrorReporter implements ErrorReporterClient {
       buidlerVersion
     );
 
-    this._clients = [sentryClient, bugsnagClient];
+    this._clients = [rollbarClient, bugsnagClient, sentryClient];
   }
 
   public async sendMessage(message: string, context: any) {
